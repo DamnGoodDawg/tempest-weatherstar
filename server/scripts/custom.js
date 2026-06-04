@@ -122,7 +122,10 @@
 	// --- Branding: call out when the Current Conditions screen is sourced from the station ---
 	// Only that screen renders Tempest data, so only its NOAA badge is swapped for a Georgia "G".
 	// Every other screen (Latest Observations, Local Forecast, forecasts, radar) keeps NOAA.
-	const UGA_LOGO = 'images/logos/uga-g.svg';
+	// Drop the real logo at server/images/logos/uga-g.png and it's used automatically;
+	// if it's missing we fall back to the placeholder uga-g.svg so the screen never breaks.
+	const UGA_LOGO = 'images/logos/uga-g.png';
+	const UGA_LOGO_FALLBACK = 'images/logos/uga-g.svg';
 	const NOAA_LOGO = 'images/logos/noaa.gif';
 	const SOURCE_TITLE = 'Source: Tempest “Home” — Statham, GA';
 
@@ -132,10 +135,12 @@
 		const live = !!cache.obs;
 		const src = img.getAttribute('src') || '';
 		if (live && !/uga-g/.test(src)) {
+			img.onerror = () => { img.onerror = null; img.src = UGA_LOGO_FALLBACK; };
 			img.setAttribute('src', UGA_LOGO);
 			img.title = SOURCE_TITLE;
 			img.classList.add('tempest-source');
 		} else if (!live && /uga-g/.test(src)) {
+			img.onerror = null;
 			img.setAttribute('src', NOAA_LOGO);
 			img.removeAttribute('title');
 			img.classList.remove('tempest-source');
