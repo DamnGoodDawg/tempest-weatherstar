@@ -22,6 +22,22 @@
   <link rel="prefetch" href="fonts/Star4000 Extended.woff" as="font" type="font/woff" crossorigin>
   <link rel="prefetch" href="fonts/Star4000 Large.woff" as="font" type="font/woff" crossorigin>
   <link rel="prefetch" href="fonts/Star4000 Small.woff" as="font" type="font/woff" crossorigin>
+
+  <!-- Tempest fork customization: default the station to Statham, GA on first load. -->
+  <!-- A static/Pages deploy has no nginx WSQS redirect, so we seed localStorage before the -->
+  <!-- app reads it (index.mjs reads localStorage 'latLon'/'latLonQuery' at startup). Only -->
+  <!-- seeds when nothing is stored and no permalink is present, so a user-chosen city sticks. -->
+  <script>
+    (function () {
+      try {
+        if (!window.location.search && !localStorage.getItem('latLon')) {
+          localStorage.setItem('latLon', '{"lat":33.9364,"lon":-83.5736}');
+          localStorage.setItem('latLonQuery', 'Statham, GA, USA');
+        }
+      } catch (e) { /* localStorage blocked; app will fall back to prompting for a location */ }
+    })();
+  </script>
+
   <% if (typeof serverAvailable !== 'undefined' && serverAvailable) { %>
   <script>
     window.WS4KP_SERVER_AVAILABLE = true;
