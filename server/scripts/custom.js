@@ -119,9 +119,35 @@
 		}
 	};
 
+	// --- Branding: call out when the Current Conditions screen is sourced from the station ---
+	// Only that screen renders Tempest data, so only its NOAA badge is swapped for a Georgia "G".
+	// Every other screen (Latest Observations, Local Forecast, forecasts, radar) keeps NOAA.
+	const UGA_LOGO = 'images/logos/uga-g.svg';
+	const NOAA_LOGO = 'images/logos/noaa.gif';
+	const SOURCE_TITLE = 'Source: Tempest “Home” — Statham, GA';
+
+	const updateBranding = () => {
+		const img = document.querySelector('#current-weather-html .noaa-logo img');
+		if (!img) return;
+		const live = !!cache.obs;
+		const src = img.getAttribute('src') || '';
+		if (live && !/uga-g/.test(src)) {
+			img.setAttribute('src', UGA_LOGO);
+			img.title = SOURCE_TITLE;
+			img.classList.add('tempest-source');
+		} else if (!live && /uga-g/.test(src)) {
+			img.setAttribute('src', NOAA_LOGO);
+			img.removeAttribute('title');
+			img.classList.remove('tempest-source');
+		}
+	};
+
 	// Warm the cache and keep it fresh so the first observation request already has data.
 	getTempest().then((obs) => {
 		console.log(obs ? '[tempest] live station data active' : '[tempest] no live data yet (showing NOAA) — set TEMPEST_TOKEN to enable');
+		updateBranding();
 	});
-	setInterval(getTempest, POLL_MS);
+	setInterval(() => { getTempest().then(updateBranding); }, POLL_MS);
+	// The Current Conditions element only exists after that screen first builds; re-apply lightly.
+	setInterval(updateBranding, 3000);
 })();

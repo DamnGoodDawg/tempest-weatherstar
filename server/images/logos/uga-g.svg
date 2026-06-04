@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 120 104" width="120" height="104" role="img" aria-label="Local station source">
+  <!-- Original Georgia-spirit badge (UGA red #BA0C2F). Marks the Current Conditions screen
+       when it is sourced from Taylor's Tempest "Home" station rather than NOAA. -->
+  <ellipse cx="60" cy="52" rx="57" ry="49" fill="#BA0C2F" stroke="#111111" stroke-width="5"/>
+  <ellipse cx="60" cy="52" rx="52" ry="44" fill="none" stroke="#ffffff" stroke-width="2.5"/>
+  <text x="60" y="55" text-anchor="middle" dominant-baseline="central"
+        font-family="'Arial Black', 'Helvetica Neue', Arial, sans-serif" font-weight="900"
+        font-size="76" fill="#ffffff">G</text>
+</svg>
