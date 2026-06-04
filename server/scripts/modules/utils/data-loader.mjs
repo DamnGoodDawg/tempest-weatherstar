@@ -9,7 +9,9 @@ const loadData = async (dataType, version = '') => {
 	}
 
 	try {
-		const url = `/data/${dataType}.json${version ? `?_=${version}` : ''}`;
+		// Relative (not root-absolute) so the app works when hosted under a subpath,
+		// e.g. GitHub Pages project sites at /<repo>/. Resolves against the document base URL.
+		const url = `data/${dataType}.json${version ? `?_=${version}` : ''}`;
 		const response = await fetch(url);
 
 		if (!response.ok) {
