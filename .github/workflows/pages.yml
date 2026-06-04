@@ -7,6 +7,10 @@ on:
   push:
     branches: [main]
   workflow_dispatch:
+  # Refresh live Tempest data on a schedule. ~10 min keeps us comfortably under GitHub
+  # Pages' deploy rate limits while staying fresh enough for a retro current-conditions screen.
+  schedule:
+    - cron: '*/10 * * * *'
 
 # Least-privilege token plus the OIDC/pages perms the deploy needs.
 permissions:
@@ -30,6 +34,20 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run build
+      - name: Publish token-free Tempest snapshot
+        env:
+          TEMPEST_TOKEN: ${{ secrets.TEMPEST_TOKEN }}
+        run: |
+          if [ -z "${TEMPEST_TOKEN}" ]; then
+            echo "::notice::TEMPEST_TOKEN not set — deploying without live data (NOAA only). Add the secret to enable."
+            exit 0
+          fi
+          if node tools/fetch-tempest.mjs > dist/tempest-current.json; then
+            echo "Published dist/tempest-current.json ($(wc -c < dist/tempest-current.json) bytes)"
+          else
+            echo "::warning::Tempest fetch failed this cycle — deploying without live data."
+            rm -f dist/tempest-current.json
+          fi
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3
         with:

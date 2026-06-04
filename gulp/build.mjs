@@ -169,6 +169,9 @@ const otherFiles = [
 	'server/robots.txt',
 	'server/manifest.json',
 	'server/music/**/*.mp3',
+	// Fork: ship the custom hook in static builds too. getCustomCode() HEAD-probes
+	// scripts/custom.js at runtime; base 'server/' places it at dist/scripts/custom.js.
+	'server/scripts/custom.js',
 ];
 const copyOtherFiles = () => src(otherFiles, { base: 'server/', encoding: false })
 	.pipe(dest('./dist'));
