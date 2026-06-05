@@ -1,158 +1,267 @@
 // Tempest fork customization (loaded by getCustomCode() as a classic script).
 //
-// Goal: show the real WeatherFlow Tempest "Home" station (Statham, GA) readings on the
-// Current Conditions screen, while keeping NOAA/NWS for everything the station can't measure
-// (sky condition text, icon, visibility, ceiling) and for all forecast/radar screens.
+// Goal: show the real WeatherFlow Tempest "Home" station (Statham, GA) data on the screens it
+// can legitimately drive, while leaving NOAA for everything else.
+//   • Current Conditions  <- live station sensors (tempest-current.json)
+//   • Hourly Forecast     <- Tempest "Better Forecast" hourly (tempest-forecast.json)
+//   • Local + Extended    <- Tempest "Better Forecast" daily   (tempest-forecast.json)
+// A station can't forecast, so the forecast screens use WeatherFlow's Better Forecast for the
+// station's location (the same forecast shown in the Tempest app).
 //
-// How: a scheduled GitHub Action publishes a token-free `tempest-current.json` next to this
-// page (~every 10 min). We poll it client-side and patch window.fetch so that when the app
-// requests the NWS station observation, we merge Tempest's sensor values into the response.
-// The app then renders, formats, and unit-converts Tempest data through its own code path,
-// so the override survives every redraw and auto-refresh.
+// How: a scheduled GitHub Action publishes token-free JSON next to this page (~every 10 min).
+// We poll it and patch window.fetch so when the app requests the matching NWS endpoint we splice
+// Tempest data into the response. The app then renders/format/unit-converts it through its own
+// code path, so the override survives every redraw and auto-refresh.
 //
-// Degrades cleanly: if tempest-current.json is missing or stale (e.g. before the token is set),
-// the NWS observation is returned untouched and the screen simply shows NOAA data.
-//
-// Units (NWS observation `properties.*.value` are metric; Tempest REST is metric too):
-//   temperature/dewpoint  °C            <- air_temperature / dew_point   (direct)
-//   relativeHumidity      %             <- relative_humidity             (direct)
-//   windSpeed/windGust    km/h          <- wind_avg / wind_gust  (m/s)   (* 3.6)
-//   windDirection         degrees       <- wind_direction               (direct)
-//   barometricPressure    pascals       <- station_pressure (hPa)        (* 100)
+// Degrades cleanly: if a snapshot is missing/stale (e.g. before the token is set), the NWS
+// response is returned untouched and that screen simply shows NOAA data.
 
 (() => {
 	'use strict';
 
-	const TEMPEST_URL = 'tempest-current.json'; // same-origin, relative -> works under the /tempest-weatherstar/ subpath
-	const POLL_MS = 60_000;                     // client refresh cadence; the JSON itself refreshes server-side (~10 min)
-	const MAX_AGE_MS = 60 * 60 * 1000;          // ignore Tempest data older than 1h (treat as unavailable)
+	const CURRENT_URL = 'tempest-current.json';
+	const FORECAST_URL = 'tempest-forecast.json';
+	const POLL_MS = 60_000;             // client refresh cadence (JSON refreshes server-side ~10 min)
+	const MAX_AGE_MS = 60 * 60 * 1000;  // ignore current obs older than 1h
 
-	// keep an un-patched reference so our own polling never recurses through the patched fetch
+	// un-patched reference so our own polling never recurses through the patched fetch
 	const nativeFetch = window.fetch.bind(window);
 
-	let cache = { at: 0, obs: null };
+	let obsCache = { at: 0, data: null };
+	let fcCache = { at: 0, data: null };
 
-	// Poll the published snapshot. Returns the latest obs object, or null if unavailable/stale.
-	const getTempest = async () => {
+	const num = (v) => (typeof v === 'number' && Number.isFinite(v) ? v : null);
+	const cToF = (c) => Math.round((c * 9) / 5 + 32);
+
+	const pollJson = async (url, pick) => {
 		const now = Date.now();
-		if (cache.obs && now - cache.at < POLL_MS) return cache.obs;
 		try {
-			// cache-bust per minute so a long-lived tab still picks up new snapshots
-			const resp = await nativeFetch(`${TEMPEST_URL}?_=${Math.floor(now / POLL_MS)}`, { cache: 'no-store' });
-			if (resp.ok) {
-				const json = await resp.json();
-				const obs = json && json.obs ? json.obs : null;
-				const tsMs = obs && obs.timestamp ? obs.timestamp * 1000 : 0;
-				cache = { at: now, obs: (tsMs && now - tsMs > MAX_AGE_MS) ? null : obs };
-			} else {
-				cache = { at: now, obs: null };
-			}
-		} catch (e) {
-			cache = { at: now, obs: null };
-		}
-		return cache.obs;
+			const resp = await nativeFetch(`${url}?_=${Math.floor(now / POLL_MS)}`, { cache: 'no-store' });
+			if (resp.ok) return pick(await resp.json());
+		} catch (e) { /* fall through */ }
+		return null;
 	};
 
-	// Merge Tempest sensor values into an NWS GeoJSON observation (mutates in place).
-	const mergeTempest = (geo, t) => {
+	// Latest station observation, or null if unavailable/stale.
+	const getCurrent = async () => {
+		const now = Date.now();
+		if (obsCache.data && now - obsCache.at < POLL_MS) return obsCache.data;
+		const obs = await pollJson(CURRENT_URL, (j) => (j && j.obs ? j.obs : null));
+		const tsMs = obs && obs.timestamp ? obs.timestamp * 1000 : 0;
+		obsCache = { at: now, data: (tsMs && now - tsMs > MAX_AGE_MS) ? null : obs };
+		return obsCache.data;
+	};
+
+	// Better Forecast (hourly + daily), or null if unavailable.
+	const getForecast = async () => {
+		const now = Date.now();
+		if (fcCache.data && now - fcCache.at < POLL_MS) return fcCache.data;
+		const fc = await pollJson(FORECAST_URL, (j) => (j && Array.isArray(j.hourly) && Array.isArray(j.daily) ? j : null));
+		fcCache = { at: now, data: fc };
+		return fcCache.data;
+	};
+
+	const jsonResponse = (data, resp) => new Response(JSON.stringify(data), {
+		status: resp.status,
+		statusText: resp.statusText,
+		headers: { 'content-type': 'application/geo+json' },
+	});
+
+	// ---- Current Conditions: merge station sensors into the NWS observation ----
+	const mergeCurrent = (geo, t) => {
 		const props = geo && geo.features && geo.features[0] && geo.features[0].properties;
 		if (!props || !t) return false;
-
 		const set = (key, value) => {
 			if (value === null || value === undefined || Number.isNaN(value)) return;
 			if (props[key] && typeof props[key] === 'object') props[key].value = value;
 			else props[key] = { value, unitCode: '', qualityControl: 'tempest' };
 		};
-		const num = (v) => (typeof v === 'number' && Number.isFinite(v) ? v : null);
-
-		set('temperature', num(t.air_temperature));                                   // C
-		set('dewpoint', num(t.dew_point));                                            // C
-		set('relativeHumidity', num(t.relative_humidity));                            // %
-		set('windDirection', num(t.wind_direction));                                  // deg
-		set('windSpeed', t.wind_avg == null ? null : num(t.wind_avg) * 3.6);          // m/s -> km/h
-		set('windGust', t.wind_gust == null ? null : num(t.wind_gust) * 3.6);         // m/s -> km/h
-
-		// Pressure: use station_pressure to match the NWS `barometricPressure` semantics
-		// (station pressure, not sea-level). Swap to t.sea_level_pressure for an altimeter-style reading.
+		set('temperature', num(t.air_temperature));                              // C
+		set('dewpoint', num(t.dew_point));                                       // C
+		set('relativeHumidity', num(t.relative_humidity));                       // %
+		set('windDirection', num(t.wind_direction));                             // deg
+		set('windSpeed', t.wind_avg == null ? null : num(t.wind_avg) * 3.6);     // m/s -> km/h
+		set('windGust', t.wind_gust == null ? null : num(t.wind_gust) * 3.6);    // m/s -> km/h
 		if (t.station_pressure != null) {
-			const pa = num(t.station_pressure) * 100; // hPa -> Pa
+			const pa = num(t.station_pressure) * 100;                            // hPa -> Pa
 			set('barometricPressure', pa);
-			// The app derives a pressure trend from features[0] vs features[1]; align [1] so we
-			// don't fabricate a rising/falling arrow from a Tempest-vs-NWS delta.
 			const p1 = geo.features[1] && geo.features[1].properties && geo.features[1].properties.barometricPressure;
-			if (p1) p1.value = pa;
+			if (p1) p1.value = pa;                                               // avoid a fabricated pressure trend
 		}
-
-		// Stamp the observation time so the header reads "Current" rather than "Recent".
-		if (t.timestamp) {
-			try { props.timestamp = new Date(t.timestamp * 1000).toISOString(); } catch (e) { /* leave as-is */ }
-		}
-
-		// expose for debugging / verification
+		if (t.timestamp) { try { props.timestamp = new Date(t.timestamp * 1000).toISOString(); } catch (e) { /* keep */ } }
 		window.__tempest = { appliedAt: new Date().toISOString(), obs: t };
 		return true;
 	};
 
-	const isObservationRequest = (url) => /\/stations\/[^/]+\/observations(\b|\?|$)/.test(url) && /api\.weather\.gov|\/api\//.test(url);
-
-	// Patch fetch: transparently enrich the NWS station observation with Tempest data.
-	window.fetch = async (input, init) => {
-		let url = '';
-		try { url = typeof input === 'string' ? input : (input && input.url) ? input.url : String(input); } catch (e) { url = ''; }
-
-		if (!isObservationRequest(url)) return nativeFetch(input, init);
-
-		const resp = await nativeFetch(input, init);
-		try {
-			const obs = await getTempest();
-			if (!obs || !resp.ok) return resp;
-			const data = await resp.clone().json();
-			if (!mergeTempest(data, obs)) return resp;
-			return new Response(JSON.stringify(data), {
-				status: resp.status,
-				statusText: resp.statusText,
-				headers: { 'content-type': 'application/geo+json' },
-			});
-		} catch (e) {
-			console.warn('[tempest] merge skipped:', e && e.message);
-			return resp;
-		}
+	// ---- Hourly: overwrite the NWS gridpoint value-series with Tempest hourly ----
+	// Keeps NWS skyCover/weather (cloud icons); replaces the displayed numbers + rain chance.
+	const applyHourly = (grid, fc) => {
+		const props = grid && grid.properties;
+		const hours = fc && fc.hourly;
+		if (!props || !hours || !hours.length) return false;
+		const startOfHour = new Date(); startOfHour.setUTCMinutes(0, 0, 0);
+		const series = (mapFn) => {
+			const vals = hours.map(mapFn);
+			if (vals.some((v) => v === null || v === undefined || Number.isNaN(v))) return null; // leave NWS
+			return vals.map((value, k) => ({
+				validTime: `${new Date(startOfHour.getTime() + k * 3_600_000).toISOString()}/PT1H`,
+				value,
+			}));
+		};
+		const set = (key, mapFn) => { const s = series(mapFn); if (props[key] && s) props[key].values = s; };
+		set('temperature', (h) => num(h.air_temperature));                                   // C
+		set('apparentTemperature', (h) => num(h.feels_like));                                // C
+		set('windSpeed', (h) => (h.wind_avg == null ? null : num(h.wind_avg) * 3.6));        // m/s -> km/h
+		set('windDirection', (h) => num(h.wind_direction));                                  // deg
+		set('probabilityOfPrecipitation', (h) => num(h.precip_probability));                 // %
+		window.__tempestHourly = { appliedAt: new Date().toISOString(), hours: hours.length };
+		return true;
 	};
 
-	// --- Branding: call out when the Current Conditions screen is sourced from the station ---
-	// Only that screen renders Tempest data, so only its NOAA badge is swapped for a Georgia "G".
-	// Every other screen (Latest Observations, Local Forecast, forecasts, radar) keeps NOAA.
-	// Drop the real logo at server/images/logos/uga-g.png and it's used automatically;
-	// if it's missing we fall back to the placeholder uga-g.svg so the screen never breaks.
+	// ---- Local + Extended: build NWS-style day/night periods from Tempest daily ----
+	const tempestToNwsCode = (icon) => {
+		const i = (icon || '').toLowerCase();
+		if (i.indexOf('thunder') >= 0) return 'tsra';
+		if (i.indexOf('snow') >= 0) return 'snow';
+		if (i.indexOf('sleet') >= 0) return 'sleet';
+		if (i.indexOf('rain') >= 0 || i.indexOf('drizzle') >= 0) return 'rain';
+		if (i.indexOf('fog') >= 0) return 'fog';
+		if (i.indexOf('partly') >= 0 || i.indexOf('mostly-clear') >= 0) return 'sct';
+		if (i.indexOf('cloudy') >= 0 || i.indexOf('overcast') >= 0) return 'ovc';
+		if (i.indexOf('clear') >= 0 || i.indexOf('sunny') >= 0) return 'skc';
+		return 'skc';
+	};
+	const nwsIconUrl = (icon, isDay) => `https://api.weather.gov/icons/land/${isDay ? 'day' : 'night'}/${tempestToNwsCode(icon)}?size=medium`;
+	const narrative = (cond, temp, isDay, pop) => {
+		let s = cond ? `${cond}.` : '';
+		if (temp != null) s += isDay ? ` High near ${temp}.` : ` Low around ${temp}.`;
+		if (pop != null && pop > 0) s += ` Chance of precipitation ${pop}%.`;
+		return s.trim();
+	};
+	const weekday = (ms) => new Date(ms).toLocaleDateString('en-US', { weekday: 'long', timeZone: 'America/New_York' });
+
+	const buildPeriods = (fc) => {
+		const daily = fc && fc.daily;
+		if (!daily || !daily.length) return null;
+		const periods = [];
+		let n = 1;
+		daily.forEach((d, idx) => {
+			const dayStart = (d.day_start_local || 0) * 1000;
+			if (!dayStart) return;
+			const sunrise = (d.sunrise || 0) * 1000 || dayStart + 6 * 3_600_000;
+			const sunset = (d.sunset || 0) * 1000 || dayStart + 19 * 3_600_000;
+			const nextStart = daily[idx + 1] && daily[idx + 1].day_start_local
+				? daily[idx + 1].day_start_local * 1000 : dayStart + 86_400_000;
+			const cond = d.conditions || '';
+			const pop = num(d.precip_probability);
+			const dow = weekday(dayStart);
+			const hi = d.air_temp_high != null ? cToF(d.air_temp_high) : null;
+			const lo = d.air_temp_low != null ? cToF(d.air_temp_low) : null;
+			if (hi != null) {
+				periods.push({
+					number: n++, name: idx === 0 ? 'Today' : dow, isDaytime: true,
+					startTime: new Date(sunrise).toISOString(), endTime: new Date(sunset).toISOString(),
+					temperature: hi, temperatureUnit: 'F',
+					probabilityOfPrecipitation: { unitCode: 'wmoUnit:percent', value: pop },
+					icon: nwsIconUrl(d.icon, true), shortForecast: cond,
+					detailedForecast: narrative(cond, hi, true, pop),
+				});
+			}
+			if (lo != null) {
+				periods.push({
+					number: n++, name: idx === 0 ? 'Tonight' : `${dow} Night`, isDaytime: false,
+					startTime: new Date(sunset).toISOString(), endTime: new Date(nextStart).toISOString(),
+					temperature: lo, temperatureUnit: 'F',
+					probabilityOfPrecipitation: { unitCode: 'wmoUnit:percent', value: pop },
+					icon: nwsIconUrl(d.icon, false), shortForecast: cond,
+					detailedForecast: narrative(cond, lo, false, pop),
+				});
+			}
+		});
+		return periods;
+	};
+
+	// ---- URL matchers ----
+	const reqUrl = (input) => {
+		try { return typeof input === 'string' ? input : (input && input.url) ? input.url : String(input); } catch (e) { return ''; }
+	};
+	const isObservation = (u) => /\/stations\/[^/]+\/observations(\b|\?|$)/.test(u) && /api\.weather\.gov|\/api\//.test(u);
+	const isGridpoint = (u) => /\/gridpoints\/[^/]+\/-?\d+,-?\d+(?:\?.*)?$/.test(u);
+	const isForecastPeriods = (u) => /\/gridpoints\/[^/]+\/-?\d+,-?\d+\/forecast(?:\?.*)?$/.test(u);
+
+	// ---- fetch dispatch ----
+	window.fetch = async (input, init) => {
+		const url = reqUrl(input);
+
+		if (isObservation(url)) {
+			const resp = await nativeFetch(input, init);
+			try {
+				const obs = await getCurrent();
+				if (!obs || !resp.ok) return resp;
+				const data = await resp.clone().json();
+				return mergeCurrent(data, obs) ? jsonResponse(data, resp) : resp;
+			} catch (e) { return resp; }
+		}
+
+		if (isGridpoint(url)) {
+			const resp = await nativeFetch(input, init);
+			try {
+				const fc = await getForecast();
+				if (!fc || !resp.ok) return resp;
+				const data = await resp.clone().json();
+				return applyHourly(data, fc) ? jsonResponse(data, resp) : resp;
+			} catch (e) { return resp; }
+		}
+
+		if (isForecastPeriods(url)) {
+			const resp = await nativeFetch(input, init);
+			try {
+				const fc = await getForecast();
+				if (!fc || !resp.ok) return resp;
+				const data = await resp.clone().json();
+				const periods = buildPeriods(fc);
+				if (periods && periods.length && data.properties) { data.properties.periods = periods; return jsonResponse(data, resp); }
+				return resp;
+			} catch (e) { return resp; }
+		}
+
+		return nativeFetch(input, init);
+	};
+
+	// ---- Branding: swap the NOAA badge for a Georgia "G" on station-sourced screens ----
+	// Drop the real logo at server/images/logos/uga-g.png; falls back to the placeholder uga-g.svg.
+	// Current Conditions and Local Forecast carry a NOAA badge; Hourly/Extended have none to swap.
 	const UGA_LOGO = 'images/logos/uga-g.png';
 	const UGA_LOGO_FALLBACK = 'images/logos/uga-g.svg';
 	const NOAA_LOGO = 'images/logos/noaa.gif';
 	const SOURCE_TITLE = 'Source: Tempest “Home” — Statham, GA';
 
-	const updateBranding = () => {
-		const img = document.querySelector('#current-weather-html .noaa-logo img');
+	const swapLogo = (selector, active) => {
+		const img = document.querySelector(selector);
 		if (!img) return;
-		const live = !!cache.obs;
 		const src = img.getAttribute('src') || '';
-		if (live && !/uga-g/.test(src)) {
+		if (active && !/uga-g/.test(src)) {
 			img.onerror = () => { img.onerror = null; img.src = UGA_LOGO_FALLBACK; };
 			img.setAttribute('src', UGA_LOGO);
 			img.title = SOURCE_TITLE;
 			img.classList.add('tempest-source');
-		} else if (!live && /uga-g/.test(src)) {
+		} else if (!active && /uga-g/.test(src)) {
 			img.onerror = null;
 			img.setAttribute('src', NOAA_LOGO);
 			img.removeAttribute('title');
 			img.classList.remove('tempest-source');
 		}
 	};
+	const updateBranding = () => {
+		swapLogo('#current-weather-html .noaa-logo img', !!obsCache.data);
+		swapLogo('#local-forecast-html .noaa-logo img', !!fcCache.data);
+	};
 
-	// Warm the cache and keep it fresh so the first observation request already has data.
-	getTempest().then((obs) => {
-		console.log(obs ? '[tempest] live station data active' : '[tempest] no live data yet (showing NOAA) — set TEMPEST_TOKEN to enable');
+	// Warm both caches so the first matching request already has data, then keep fresh.
+	Promise.all([getCurrent(), getForecast()]).then(([obs, fc]) => {
+		console.log(`[tempest] current: ${obs ? 'live' : 'NOAA'} · forecast: ${fc ? 'live' : 'NOAA'}`);
 		updateBranding();
 	});
-	setInterval(() => { getTempest().then(updateBranding); }, POLL_MS);
-	// The Current Conditions element only exists after that screen first builds; re-apply lightly.
-	setInterval(updateBranding, 3000);
+	setInterval(() => { Promise.all([getCurrent(), getForecast()]).then(updateBranding); }, POLL_MS);
+	setInterval(updateBranding, 3000); // screen elements appear only after each screen first builds
 })();
