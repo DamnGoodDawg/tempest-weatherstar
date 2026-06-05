@@ -228,33 +228,86 @@
 		return nativeFetch(input, init);
 	};
 
-	// ---- Branding: swap the NOAA badge for a Georgia "G" on station-sourced screens ----
-	// Drop the real logo at server/images/logos/uga-g.png; falls back to the placeholder uga-g.svg.
-	// Current Conditions and Local Forecast carry a NOAA badge; Hourly/Extended have none to swap.
-	const UGA_LOGO = 'images/logos/uga-g.png';
-	const UGA_LOGO_FALLBACK = 'images/logos/uga-g.svg';
+	// ---- Branding: "Powered by Tempest" on station-sourced screens ----
+	// Header text replaces the NOAA badge where there is one (Current Conditions, Local Forecast,
+	// Latest Observations); a small corner ribbon marks the screens without a badge (Hourly,
+	// Hourly Graph, Extended). Latest Observations also gets the Tempest "Home" station as its top row.
 	const NOAA_LOGO = 'images/logos/noaa.gif';
 	const SOURCE_TITLE = 'Source: Tempest “Home” — Statham, GA';
 
-	const swapLogo = (selector, active) => {
-		const img = document.querySelector(selector);
-		if (!img) return;
-		const src = img.getAttribute('src') || '';
-		if (active && !/uga-g/.test(src)) {
-			img.onerror = () => { img.onerror = null; img.src = UGA_LOGO_FALLBACK; };
-			img.setAttribute('src', UGA_LOGO);
-			img.title = SOURCE_TITLE;
-			img.classList.add('tempest-source');
-		} else if (!active && /uga-g/.test(src)) {
-			img.onerror = null;
-			img.setAttribute('src', NOAA_LOGO);
-			img.removeAttribute('title');
-			img.classList.remove('tempest-source');
-		}
+	const style = document.createElement('style');
+	style.textContent = ''
+		+ ".tempest-powered{font-family:'Star4000',monospace;text-align:center;line-height:1.05;text-shadow:2px 2px 0 #000}"
+		+ '.tempest-powered .pb{font-size:12px;color:#fff;letter-spacing:.5px}'
+		+ '.tempest-powered .tm{font-size:20px;color:#ffe000}'
+		+ ".tempest-ribbon{position:absolute;bottom:42px;right:10px;z-index:60;font-family:'Star4000',monospace;"
+		+ 'font-size:13px;color:#ffe000;background:rgba(0,0,52,.66);padding:2px 8px;text-shadow:1px 1px 0 #000;pointer-events:none}';
+	document.head.appendChild(style);
+
+	const POWERED_HTML = '<div class="tempest-powered"><div class="pb">POWERED BY</div><div class="tm">TEMPEST</div></div>';
+
+	// Swap the NOAA badge for "Powered by Tempest" header text (or back).
+	const headerTreatment = (screenSel, active) => {
+		const slot = document.querySelector(`${screenSel} .noaa-logo`);
+		if (!slot) return;
+		const has = !!slot.querySelector('.tempest-powered');
+		if (active && !has) { slot.innerHTML = POWERED_HTML; slot.title = SOURCE_TITLE; }
+		else if (!active && has) { slot.innerHTML = `<img src="${NOAA_LOGO}" />`; slot.removeAttribute('title'); }
 	};
+
+	// Small corner ribbon for screens that have no header badge.
+	const ribbonTreatment = (screenSel, active) => {
+		const screen = document.querySelector(screenSel);
+		if (!screen) return;
+		const r = screen.querySelector(':scope > .tempest-ribbon');
+		if (active && !r) {
+			const el = document.createElement('div');
+			el.className = 'tempest-ribbon';
+			el.textContent = 'POWERED BY TEMPEST';
+			screen.appendChild(el);
+		} else if (!active && r) { r.remove(); }
+	};
+
+	const COMPASS = ['N', 'NNE', 'NE', 'ENE', 'E', 'ESE', 'SE', 'SSE', 'S', 'SSW', 'SW', 'WSW', 'W', 'WNW', 'NW', 'NNW'];
+	const deg16 = (deg) => COMPASS[Math.round((deg % 360) / 22.5) % 16];
+
+	// Inject the Tempest "Home" station as the top row of Latest Observations (mirrors a real row).
+	const homeRow = (active) => {
+		const lines = document.querySelector('#latest-observations-html .observation-lines');
+		if (!lines) return;
+		const existing = lines.querySelector('.tempest-home-row');
+		const obs = obsCache.data;
+		if (!active || !obs) { if (existing) existing.remove(); return; }
+		if (existing) return;
+		const sample = lines.firstElementChild;
+		if (!sample) return; // need a rendered row to copy the structure
+		const row = sample.cloneNode(true);
+		row.classList.add('tempest-home-row');
+		const tempF = obs.air_temperature != null ? cToF(obs.air_temperature) : '';
+		const likeF = obs.feels_like != null ? cToF(obs.feels_like) : '';
+		const mph = obs.wind_avg != null ? Math.round((obs.wind_avg * 3.6) / 1.609) : 0;
+		const dir = obs.wind_direction != null ? deg16(obs.wind_direction) : '';
+		const cond = (fcCache.data && fcCache.data.hourly && fcCache.data.hourly[0] && fcCache.data.hourly[0].conditions) || '';
+		const setF = (sel, val) => { const e = row.querySelector(sel); if (e) e.textContent = val; };
+		setF('.location', 'Home');
+		setF('.temp', tempF === '' ? '' : String(tempF));
+		const likeEl = row.querySelector('.like');
+		if (likeEl) { likeEl.className = 'like'; likeEl.textContent = (likeF === '' || likeF === tempF) ? '' : String(likeF); }
+		setF('.weather', cond.substr(0, 9));
+		setF('.wind', mph > 0 ? `${dir} ${mph}` : 'Calm');
+		lines.insertBefore(row, lines.firstChild);
+	};
+
 	const updateBranding = () => {
-		swapLogo('#current-weather-html .noaa-logo img', !!obsCache.data);
-		swapLogo('#local-forecast-html .noaa-logo img', !!fcCache.data);
+		const cur = !!obsCache.data;
+		const fc = !!fcCache.data;
+		homeRow(cur);
+		headerTreatment('#current-weather-html', cur);
+		headerTreatment('#local-forecast-html', fc);
+		headerTreatment('#latest-observations-html', cur);
+		ribbonTreatment('#hourly-html', fc);
+		ribbonTreatment('#hourly-graph-html', fc);
+		ribbonTreatment('#extended-forecast-html', fc);
 	};
 
 	// Warm both caches so the first matching request already has data, then keep fresh.
