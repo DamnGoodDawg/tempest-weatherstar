@@ -48,6 +48,12 @@ jobs:
             echo "::warning::Tempest fetch failed this cycle — deploying without live data."
             rm -f dist/tempest-current.json
           fi
+          if node tools/fetch-forecast.mjs > dist/tempest-forecast.json; then
+            echo "Published dist/tempest-forecast.json ($(wc -c < dist/tempest-forecast.json) bytes)"
+          else
+            echo "::warning::Tempest forecast fetch failed this cycle — forecast screens stay NOAA."
+            rm -f dist/tempest-forecast.json
+          fi
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3
         with:
