@@ -506,12 +506,15 @@ const getForecastFromLatLon = (latitude, longitude, fromGps = false) => {
 };
 
 const getCustomCode = async () => {
+	// Cache-bust so custom.js updates reach clients immediately (GitHub Pages caches assets for
+	// 10 min; the fork's customizations live here, so we always want the freshest copy).
+	const bust = `?_=${Date.now()}`;
 	// fetch the custom file and see if it returns a 200 status
-	const response = await fetch('scripts/custom.js', { method: 'HEAD' });
+	const response = await fetch(`scripts/custom.js${bust}`, { method: 'HEAD' });
 	if (response.ok) {
 		// add the script element to the page
 		const customElem = document.createElement('script');
-		customElem.src = 'scripts/custom.js';
+		customElem.src = `scripts/custom.js${bust}`;
 		customElem.type = 'text/javascript';
 		document.body.append(customElem);
 	}
