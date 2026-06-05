@@ -298,7 +298,21 @@
 		lines.insertBefore(row, lines.firstChild);
 	};
 
+	// Relabel our nearest NWS station (KWDR — physically in Winder) to our actual town, so the
+	// "Conditions at …" scroll, Current Conditions, and Headend all read Statham. The app derives
+	// the on-screen city from StationInfo[stationId].city (our Tempest station is in Statham anyway).
+	const HOME_STATION = 'KWDR';
+	const HOME_CITY = 'Statham';
+	const relabelStation = () => {
+		const info = window.StationInfo;
+		if (info && typeof info === 'object') {
+			const cur = info[HOME_STATION];
+			if (!cur || cur.city !== HOME_CITY) info[HOME_STATION] = Object.assign({}, cur, { city: HOME_CITY });
+		}
+	};
+
 	const updateBranding = () => {
+		relabelStation();
 		const cur = !!obsCache.data;
 		const fc = !!fcCache.data;
 		homeRow(cur);
@@ -309,6 +323,11 @@
 		ribbonTreatment('#hourly-graph-html', fc);
 		ribbonTreatment('#extended-forecast-html', fc);
 	};
+
+	// Set the Statham label as early as possible — before the app resolves the station.
+	relabelStation();
+	const relabelBoot = setInterval(relabelStation, 100);
+	setTimeout(() => clearInterval(relabelBoot), 15_000);
 
 	// Warm both caches so the first matching request already has data, then keep fresh.
 	Promise.all([getCurrent(), getForecast()]).then(([obs, fc]) => {
